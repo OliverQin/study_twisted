@@ -100,10 +100,18 @@ def randomSend():
             x = OverWallRNG.genUint32()
             g.requestEstablish(x, '127.0.0.1', 555)
     
-    reactor.callLater(5.0, randomSend)
+    reactor.callLater(2.0, randomSend)
 
-def RemoteDataReceived(idx, seq, data):
+def remoteDataReceived(idx, seq, data):
+    if (idx not in OverWallConnections):
+        OverWallFeedbacks.append( idx, seq, 0x3 )
+
     nseq = OverWallConnections[idx].seqSentToRemote()
+    if (seq >= nseq):
+        OverWallFeedbacks.append( (idx, seq, 0) )
+    else:
+        OverWallFeedbacks.append( (idx, seq, 1) )
+    
     while nseq in OverWallConnections[idx].bufferSentToRemote():
         #Send
         data = OverWallConnections[idx].dataSentToRemote(nseq)
@@ -177,8 +185,7 @@ class OverWallControlProtocol(SmallEncryptedProtocol):
         
     def sendToRemote(self, idx, seq, data):
         OverWallConnections[idx].bufferSentToRemote()[seq] = data
-        RemoteDataReceived(idx, seq, data)
-        OverWallFeedbacks.append( (idx, seq, 0) )
+        remoteDataReceived(idx, seq, data)
         pass
     
     def closeRemoteConnection(self, idx):
@@ -199,10 +206,12 @@ class OverWallControlProtocol(SmallEncryptedProtocol):
         self.sendChunk( '\x04' + ''.join( chr(random.randrange(256)) for _ in xrange(9) ) )
     
     def sendToEndpoint(self, idx, data, seq=None):
+        #print 'sendto endpoint', hex(idx), hashlib.md5(data).hexdigest(), seq
         if seq is None:
             seq = OverWallConnections[idx].addSentToEndpoint()
         else:
-            if seq not in OverWallConnections[idx].bufferSentToEndpoint():
+            if idx not in OverWallConnections or \
+                seq not in OverWallConnections[idx].bufferSentToEndpoint():
                 return #Success
             
         OverWallConnections[idx].bufferSentToEndpoint()[seq] = data
@@ -278,7 +287,7 @@ def testClient():
         reactor.connectTCP('127.0.0.1', 8555, f)
     
     reactor.callLater( 1.0, establishAll, 5 )
-    reactor.callLater( 5.0, randomSend )
+    reactor.callLater( 2.0, randomSend )
     
     reactor.callLater(0.0, giveFeedBack)
     reactor.run()

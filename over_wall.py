@@ -3,27 +3,168 @@
 
 __all__ = ['OverWallControlProtocol']
 
+from twisted.internet.protocol import Protocol, Factory, ClientFactory
 from se_protocol import SmallEncryptedProtocol
 from struct import pack, unpack
-import random
+import random, hashlib
+import sys
+from securerng import SecureRNG
+from twisted.internet import reactor, protocol, defer
+
+_OverWallFeedbackInterval = 1.5
+_OverWallRetryInterval = 15.0
+
+class ConnectionManagerNode:
+    SentToRemote = 0
+    SentToEndpoint = 1
+    
+    def __init__(self, obj):
+        self.obj = obj
+        self.sent = [0, 0]
+        self.bufs = [dict(), dict()]
+        
+    def bufferSentToRemote(self):
+        return self.bufs[ self.SentToRemote ]
+    
+    def bufferSentToEndpoint(self):
+        return self.bufs[ self.SentToEndpoint ]
+    
+    def seqSentToRemote(self):
+        return self.sent[ self.SentToRemote ]
+    
+    def seqSentToEndpoint(self):
+        return self.sent[ self.SentToEndpoint ]
+    
+    def dataSentToRemote(self, seq):
+        return self.bufs[ self.SentToRemote ][seq]
+    
+    def dataSentToEndpoint(self, seq):
+        return self.bufs[ self.SentToEndpoint ][seq]
+    
+    def addSentToRemote(self):
+        a = self.sent[ self.SentToRemote ]
+        self.sent[ self.SentToRemote ] += 1
+        return a
+    
+    def addSentToEndpoint(self):
+        a = self.sent[ self.SentToEndpoint ]
+        self.sent[ self.SentToEndpoint ] += 1
+        return a
+
+class ConnectionManager:
+    def __init__(self):
+        self.data = dict()
+        
+    def add(self, idx, obj):
+        self.data[idx] = ConnectionManagerNode(obj)
+    
+    def pop(self, idx):
+        return self.data.pop(idx)
+        
+    def __getitem__(self, idx):
+        return self.data[idx]
+        
+    def __contains__(self, idx):
+        return idx in self.data
+
+
+OverWallRNG = SecureRNG()
+OverWallConnections = ConnectionManager()
+OverWallPool = set()
+OverWallFeedbacks = []
+
+GlobalSwitch = False
+
+SuperIdxs = []
+
+def establishAll(num):
+    for _ in range(num):
+        x = OverWallRNG.genUint32()
+        g = chooseRandomOverWallConnection()
+        g.requestEstablish(x, '127.0.0.1', 555)
+
+def randomSend():
+    global SuperIdxs
+    a = random.randrange(5)
+    g = chooseRandomOverWallConnection()
+    if (a < 3):
+        data = OverWallRNG.genStr(8888)
+        g.sendToEndpoint( random.choice(SuperIdxs), data )
+    elif (a == 3):
+        idx = random.choice(SuperIdxs)
+        g.requestClose(idx)
+    else:
+        if sys.argv[1] == 'server':
+            return
+        else:
+            x = OverWallRNG.genUint32()
+            g.requestEstablish(x, '127.0.0.1', 555)
+    
+    reactor.callLater(5.0, randomSend)
+
+def RemoteDataReceived(idx, seq, data):
+    nseq = OverWallConnections[idx].seqSentToRemote()
+    while nseq in OverWallConnections[idx].bufferSentToRemote():
+        #Send
+        data = OverWallConnections[idx].dataSentToRemote(nseq)
+        print "{0:#08x}".format(idx), "{0:#02x}".format(nseq), hashlib.md5(data).hexdigest(), 'Rcv'
+        OverWallConnections[idx].addSentToRemote()
+        OverWallConnections[idx].bufferSentToRemote().pop( nseq )
+        nseq += 1
+    return 
+
+def chooseRandomOverWallConnection():
+    if len(OverWallPool) > 0:
+        return random.choice( list(OverWallPool) )
+    else:
+        return None
+
+def giveFeedBack():
+    g = chooseRandomOverWallConnection()
+    if g is not None:
+        global OverWallFeedbacks
+        
+        g.sendFeedback( OverWallFeedbacks )
+        OverWallFeedbacks = []
+    
+    reactor.callLater( _OverWallFeedbackInterval, giveFeedBack )
 
 class OverWallControlProtocol(SmallEncryptedProtocol):
     def __init__(self):
         SmallEncryptedProtocol.__init__(self)
-        
-    def establishConnection(self, oldIdx, addr, port):
-        #return (status, newIdx)
-        pass
+        OverWallPool.add(self)
     
-    def requestEstablish(self, oldIdx, addr, port):
-        self.sendChunk( '\x01' + pack('<IH', oldIdx, port) + addr )
+    def establishConnection(self, idx, addr, port):
+        print "{0:#08x}".format(idx), 'Req'
         
-    def establishDone(self, oldIdx, newIdx, status):
+        if (idx in OverWallConnections):
+            self.sendChunk( '\xfe\x02' + pack('<I', idx) )
+        else:
+            OverWallConnections.add( idx, None )
+            SuperIdxs.append(idx)
+            self.sendChunk( '\xfe\x00' + pack('<I', idx) )
+            
+        global GlobalSwitch
+        if (GlobalSwitch == False):
+            GlobalSwitch = True
+            reactor.callLater(7.0, randomSend)
+        
+    def requestEstablish(self, idx, addr, port):
+        self.sendChunk( '\x01' + pack('<IH', idx, port) + addr )
+        
+    def establishDone(self, idx, status):
+        OverWallConnections.add(idx, None)
+        SuperIdxs.append(idx)
+        print "{0:#08x}".format(idx), 'Est', len(SuperIdxs), len(OverWallConnections.data)
         pass
         
     def gotSendFeedback(self, feedbacks):
         #feedbacks = [ (idx1, seq1, status1), (idx2, seq2, status2), ... ]
-        pass
+        for idx, seq, status in feedbacks:
+            if (status == 0x0 or status == 0x1) and (idx in OverWallConnections):
+                if seq in OverWallConnections[idx].bufferSentToEndpoint():
+                    print "{0:#08x}".format(idx), "{0:#02x}".format(seq), 'SucSnt'
+                    OverWallConnections[idx].bufferSentToEndpoint().pop(seq)
     
     def sendFeedback(self, feedbacks):
         if len(feedbacks) == 0:
@@ -35,26 +176,42 @@ class OverWallControlProtocol(SmallEncryptedProtocol):
         self.sendChunk( res )
         
     def sendToRemote(self, idx, seq, data):
-        #no return, batch response
+        OverWallConnections[idx].bufferSentToRemote()[seq] = data
+        RemoteDataReceived(idx, seq, data)
+        OverWallFeedbacks.append( (idx, seq, 0) )
         pass
     
     def closeRemoteConnection(self, idx):
-        #return (status)
-        pass
-    
+        OverWallConnections.pop(idx)
+        SuperIdxs.remove(idx)
+        return 0
+
     def requestClose(self, idx):
+        print "{0:#08x}".format(idx), 'Cls'
+        SuperIdxs.remove(idx)
         self.sendChunk( '\x03' + pack('<I', idx) )
     
     def closingRemoteDone(self, idx, status):
-        pass
+        OverWallConnections.pop(idx)
+        print "{0:#08x}".format(idx), 'Cld'
     
     def sendHeartBeat(self):
         self.sendChunk( '\x04' + ''.join( chr(random.randrange(256)) for _ in xrange(9) ) )
     
-    def sendToEndpoint(self, idx, seq, data):
-        print 'Sending...', idx, seq, len(data)
+    def sendToEndpoint(self, idx, data, seq=None):
+        if seq is None:
+            seq = OverWallConnections[idx].addSentToEndpoint()
+        else:
+            if seq not in OverWallConnections[idx].bufferSentToEndpoint():
+                return #Success
+            
+        OverWallConnections[idx].bufferSentToEndpoint()[seq] = data
+        print "{0:#08x}".format(idx), "{0:#02x}".format(seq), hashlib.md5(data).hexdigest(), 'Snt'
+        
         n = '\x02' + pack('<II', idx, seq) + data
         self.sendChunk( n )
+        
+        reactor.callLater(_OverWallRetryInterval, self.sendToEndpoint, idx, data, seq)
     
     def chunkReceived(self, data):
         if len(data) == 0:
@@ -62,18 +219,18 @@ class OverWallControlProtocol(SmallEncryptedProtocol):
         
         cmd = data[0]
         if (cmd == '\x01'):
-            oldIdx, port = unpack('<IH', data[1:7])
+            idx, port = unpack('<IH', data[1:7])
             addr = data[7:]
             
-            self.establishConnection(oldIdx, addr, port)
+            self.establishConnection(idx, addr, port)
             
             #FIXME: Python 2.7 does not support return after yield
-            #status, idx = self.establishConnection(oldIdx, addr, port)
-            #self.sendChunk( '\xfe' + pack('<BII', status, oldIdx, idx) )
+            #status, idx = self.establishConnection(idx, addr, port)
+            #self.sendChunk( '\xfe' + pack('<BII', status, idx) )
         
         elif (cmd == '\x02'):
             idx, seq = unpack('<II', data[1:9])
-            print 'Received-:', idx, seq, len(data[9:])
+            #print 'Received-:', idx, seq, len(data[9:])
             self.sendToRemote( idx, seq, data[9:] )
             
             #no reply directly
@@ -86,8 +243,8 @@ class OverWallControlProtocol(SmallEncryptedProtocol):
             self.sendChunk( '\xfc' + data[1:5] + pack('<B', status) )
             
         elif (cmd == '\xfe'):
-            status, oldIdx, idx = unpack('<BII', data[1:10])
-            self.establishDone( oldIdx, idx, status )
+            status, idx = unpack('<BI', data[1:6])
+            self.establishDone( idx, status )
             
         elif (cmd == '\xfd'):
             feedbacks = []
@@ -100,6 +257,36 @@ class OverWallControlProtocol(SmallEncryptedProtocol):
             idx, status = unpack( '<IB', data[1:6] )
             
             self.closingRemoteDone( idx, status )
+        
+    def connectionLost(self, reason):
+        OverWallPool.remove( self )
+
+def testServer():
+    f = Factory()
+    f.protocol = OverWallControlProtocol
+    reactor.listenTCP(8555, f)
+    
+    reactor.callLater(0.0, giveFeedBack)
+    reactor.run()
+
+def testClient():
+    for _ in range(10):
+        f = ClientFactory()
+        f.protocol = OverWallControlProtocol
             
-            
+        #reactor.connectTCP('23.105.199.44', 8555, f)
+        reactor.connectTCP('127.0.0.1', 8555, f)
+    
+    reactor.callLater( 1.0, establishAll, 5 )
+    reactor.callLater( 5.0, randomSend )
+    
+    reactor.callLater(0.0, giveFeedBack)
+    reactor.run()
+
+if __name__ == '__main__':
+    
+    if sys.argv[1] == 'server':
+        testServer()
+    else:
+        testClient()
     

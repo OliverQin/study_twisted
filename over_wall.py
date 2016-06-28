@@ -87,6 +87,9 @@ def randomSend():
     global SuperIdxs
     a = random.randrange(5)
     g = chooseRandomOverWallConnection()
+    if sys.argv[1] != 'server' and len(SuperIdxs) < 3:
+        a = 3
+        
     if (a < 3):
         data = OverWallRNG.genStr(8888)
         g.sendToEndpoint( random.choice(SuperIdxs), data )

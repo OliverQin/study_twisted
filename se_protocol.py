@@ -46,13 +46,18 @@ class SmallEncryptedProtocol(protocol.Protocol):
     def dataReceived(self, data):
         data = self.miniBuffer + data
         self.miniBuffer = ''
-        
+
         while data:
+            if len(data) < 18:
+                self.miniBuffer = data
+                return
+        
             (iv_idx, ) = unpack('<Q', data[:8])
             
             if iv_idx in SmallEncryptedIVPool:
                 #Suffering from attack!
                 self.miniBuffer = ''
+                print 'Under attack'
                 return #Ignore
             
             cipher = aes.new( SymmetricKey, aes.MODE_CFB, InitVectorPrefix + data[:8] )
@@ -60,6 +65,7 @@ class SmallEncryptedProtocol(protocol.Protocol):
             
             if magic != 23333:
                 self.miniBuffer = ''
+                print 'Under attack'
                 return #Ignore
             
             lenData = len(data) - 18

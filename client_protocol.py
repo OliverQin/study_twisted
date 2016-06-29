@@ -26,7 +26,7 @@ _ClientSideFeedbackInterval = 5.0
 _ClientSideCloseRetry = 2.0
 
 _ClientSideOldIdxCounter = 0
-_ClientMinPoolSize = 10
+_ClientMinPoolSize = 15
 
 ProxyHost, ProxyPort = '127.0.0.1', 8555
 

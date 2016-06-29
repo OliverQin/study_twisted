@@ -24,7 +24,8 @@ class SecureRNG:
         self.state = ''.join( chr(random.randrange(256)) for _ in range(self.StateLen) )
         
         self.cipher = aes.new( self.key, aes.MODE_CFB, self.iv )
-        self.refreshState()
+        for _ in range(16):
+            self.refreshState()
         
     def refreshState(self):
         self.pointer = 0
